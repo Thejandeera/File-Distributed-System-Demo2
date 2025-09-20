@@ -1,0 +1,55 @@
+:root {
+  --background: #f9f9f9;
+  --foreground: #111;
+  --button-bg: #007bff;
+  --button-bg-hover: #0056b3;
+  --button-text: #fff;
+  --file-bg: #fff;
+  --file-border: #ccc;
+  --font-family: Arial, sans-serif;
+}
+
+body {
+  margin: 0;
+  padding: 40px;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-family);
+}
+
+h1 {
+  font-size: 24px;
+  font-weight: bold;
+  margin-bottom: 20px;
+}
+
+h2 {
+  font-size: 18px;
+  margin-top: 40px;
+  margin-bottom: 10px;
+}
+
+button {
+  background-color: var(--button-bg);
+  color: var(--button-text);
+  padding: 8px 16px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+button:hover {
+  background-color: var(--button-bg-hover);
+}
+
+.file-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background-color: var(--file-bg);
+  padding: 10px;
+  border: 1px solid var(--file-border);
+  border-radius: 6px;
+  margin-bottom: 10px;
+}

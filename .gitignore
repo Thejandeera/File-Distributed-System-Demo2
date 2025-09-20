@@ -1,0 +1,23 @@
+# Go build files
+*.exe
+*.out
+*.test
+bin/
+
+# Node modules
+node_modules/
+.next/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# VS Code
+.vscode/
+
+# Env
+.env
+
+# Mac/Linux
+.DS_Store
