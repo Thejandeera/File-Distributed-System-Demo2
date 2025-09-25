@@ -776,7 +776,7 @@ func (s *Server) Start() {
 			}
 
 			// CRITICAL FIX: Add sleep to prevent tight loop
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(200 * time.Millisecond)
 		}
 	}()
 }
