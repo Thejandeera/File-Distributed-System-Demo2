@@ -10,6 +10,7 @@ import (
 	"log"
     "math/rand"
     "net/http"
+    "net"
     "os"
     "path/filepath"
     "strconv"
@@ -331,6 +332,29 @@ func main() {
     rand.Seed(int64(binary.LittleEndian.Uint64(b[:])))
 
     cfg := getConfig()
+
+    // Auto single-node mode: if peers are unreachable, run as a 1-node cluster
+    // This lets the remaining node become leader even if others are down.
+    type reach struct{ idx int; ok bool }
+    self := cfg.cluster[cfg.index]
+    reachable := 0
+    for i, m := range cfg.cluster {
+        if i == cfg.index {
+            reachable++
+            continue
+        }
+        // Probe peer address quickly
+        conn, err := net.DialTimeout("tcp", m.Address, 300*time.Millisecond)
+        if err == nil {
+            reachable++
+            conn.Close()
+        }
+    }
+    if reachable <= 1 {
+        log.Printf("Single-node mode enabled: peers unreachable. Becoming standalone cluster.")
+        cfg.cluster = []goraft.ClusterMember{self}
+        cfg.index = 0
+    }
 
     sm := NewDFSStateMachine()
 
