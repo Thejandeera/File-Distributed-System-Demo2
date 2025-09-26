@@ -6,6 +6,53 @@ A robust, production-ready distributed file system implemented in Go with advanc
 
 This distributed file system provides enterprise-grade file storage and replication across multiple nodes with automatic failover, leader election, and self-healing capabilities. Built with Go and designed for high availability and data consistency.
 
+## ▶️ Run (Raft + HTTP)
+
+### Build once
+```powershell
+cd backup
+go mod tidy
+go build -o dfsapi.exe .
+```
+
+### Start 3-node cluster (recommended)
+```powershell
+./start-cluster.ps1
+```
+
+### Start nodes manually (alternative)
+Run each in a separate terminal from the `backup` directory:
+```powershell
+./dfsapi.exe --node 0 --http :8081 --cluster 1,:3030;2,:3031;3,:3032
+./dfsapi.exe --node 1 --http :8082 --cluster 1,:3030;2,:3031;3,:3032
+./dfsapi.exe --node 2 --http :8083 --cluster 1,:3030;2,:3031;3,:3032
+```
+
+### Verify
+```bash
+curl http://localhost:8081/status
+curl http://localhost:8082/status
+curl http://localhost:8083/status
+```
+
+### Upload and fetch files
+```bash
+# Upload to leader (replace 8081 with the leader's HTTP port)
+curl -X POST --data-binary @README.md http://localhost:8081/upload/README.md
+
+# List files (on any node)
+curl http://localhost:8082/files
+
+# Download (served from local ./data folder)
+curl http://localhost:8083/README.md -o README.copy.md
+```
+
+### Windows note
+If PowerShell blocks scripts, run the launcher with:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\start-cluster.ps1
+```
+
 ## ✨ Key Features
 
 ### Core Architecture

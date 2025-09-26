@@ -4,6 +4,7 @@ module distributedfs
 go 1.25.1
 
 require (
+	distributed-file-system v0.0.0
 	github.com/beevik/ntp v1.4.3
 	github.com/hashicorp/raft v1.7.3
 	github.com/hashicorp/raft-boltdb v0.0.0-20250701115049-6cdf087e85ed
@@ -24,3 +25,5 @@ require (
 	golang.org/x/net v0.44.0 // indirect
 	golang.org/x/sys v0.36.0 // indirect
 )
+
+replace distributed-file-system => ../distributed-file-system
