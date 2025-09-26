@@ -2,9 +2,9 @@
 import React, { useEffect, useState } from 'react'
 
 const NODES = [
-  'http://localhost:8000',
-  'http://localhost:8001',
-  'http://localhost:8002',
+  'http://localhost:8081',
+  'http://localhost:8082',
+  'http://localhost:8083',
 ];
 
 export default function Home() {
@@ -47,20 +47,21 @@ export default function Home() {
       try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 3000);
-        const res = await fetch(node + "/leader", { signal: controller.signal });
+        const res = await fetch(node + "/status", { signal: controller.signal });
         clearTimeout(timeoutId);
         if (res.ok) {
-          const text = await res.text();
-          if (text.includes(node.replace('http://localhost:', ''))) {
+          const data = await res.json();
+          if (data?.is_leader) {
             setLeaderURL(node);
+            setLeaderName(`Leader @ ${node}`);
+            return;
           }
-          setLeaderName(text);
-          return;
         }
       } catch (err) {
-        console.warn(`❌ Failed to fetch leader from ${node}`);
+        console.warn(`❌ Failed to fetch status from ${node}`);
       }
     }
+    setLeaderURL('');
     setLeaderName('Unknown');
   };
 
@@ -69,7 +70,9 @@ export default function Home() {
     try {
       const res = await fetch(`${leaderURL}/files`);
       const data = await res.json();
-      setFiles(data || []);
+      // backup server returns array of objects: { name, size, last_modified }
+      const names = Array.isArray(data) ? data.map((f: any) => f.name || f.Name).filter(Boolean) : [];
+      setFiles(names);
     } catch (err) {
       console.error('❌ Failed to fetch files', err);
       setFiles([]);
@@ -79,11 +82,12 @@ export default function Home() {
   const fetchStats = async () => {
     if (!leaderURL) return;
     try {
-      const res = await fetch(`${leaderURL}/stats`);
+      // stats endpoint not provided by backup server; derive minimal stats
+      const res = await fetch(`${leaderURL}/files`);
       const data = await res.json();
-      setStats(data);
+      const names = Array.isArray(data) ? data.map((f: any) => f.name || f.Name).filter(Boolean) : [];
+      setStats({ totalFiles: names.length, totalBytes: 0, quotaBytes: 1 });
     } catch (err) {
-      console.error('❌ Failed to fetch stats', err);
       setStats(null);
     }
   };
@@ -92,7 +96,7 @@ export default function Home() {
     const status: Record<string, boolean> = {};
     for (const url of NODES) {
       try {
-        const res = await fetch(`${url}/health`);
+        const res = await fetch(`${url}/status`);
         status[url] = res.ok;
       } catch {
         status[url] = false;
@@ -105,13 +109,10 @@ export default function Home() {
     if (!selectedFile) return alert('Please select a file');
     if (!leaderURL) return alert('No leader available');
 
-    const formData = new FormData();
-    formData.append('file', selectedFile);
-
     try {
-      const res = await fetch(`${leaderURL}/upload`, {
+      const res = await fetch(`${leaderURL}/upload/${encodeURIComponent(selectedFile.name)}`, {
         method: 'POST',
-        body: formData,
+        body: selectedFile,
       });
       if (res.ok) {
         alert('✅ File uploaded');
@@ -130,7 +131,7 @@ export default function Home() {
     if (!leaderURL) return;
     
     try {
-      const response = await fetch(`${leaderURL}/download?name=${filename}`);
+      const response = await fetch(`${leaderURL}/${encodeURIComponent(filename)}`);
       
       if (!response.ok) {
         alert('❌ Failed to download file');
@@ -160,18 +161,7 @@ export default function Home() {
     }
   };
 
-  const handleDelete = async (filename: string) => {
-    if (!leaderURL) return;
-    try {
-      const res = await fetch(`${leaderURL}/delete?name=${filename}`, { method: 'DELETE' });
-      if (res.ok) {
-        fetchFiles();
-        fetchStats();
-      }
-    } catch (err) {
-      console.error('❌ Failed to delete file', err);
-    }
-  };
+  // Delete endpoint not implemented in backup server.
 
   const sendMessage = (from: string, to: string) => {
     setClocks(prev => {
@@ -584,30 +574,6 @@ export default function Home() {
                     }}
                   >
                     Download
-                  </button>
-                  <button 
-                    onClick={() => handleDelete(file)} 
-                    style={{
-                      background: '#ffffff',
-                      color: '#dc3545',
-                      padding: '0.5rem 1rem',
-                      borderRadius: '6px',
-                      border: '1px solid #dc3545',
-                      cursor: 'pointer',
-                      fontSize: '0.875rem',
-                      fontWeight: '500',
-                      transition: 'all 0.2s ease'
-                    }}
-                    onMouseOver={(e) => {
-                      e.currentTarget.style.background = '#dc3545';
-                      e.currentTarget.style.color = '#ffffff';
-                    }}
-                    onMouseOut={(e) => {
-                      e.currentTarget.style.background = '#ffffff';
-                      e.currentTarget.style.color = '#dc3545';
-                    }}
-                  >
-                    Delete
                   </button>
                 </div>
               </div>

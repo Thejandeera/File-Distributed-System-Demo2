@@ -125,96 +125,136 @@ type httpServer struct {
 }
 
 func (hs *httpServer) statusHandler(w http.ResponseWriter, r *http.Request) {
-    isLeader := hs.raft.IsLeader()
-    status := map[string]interface{}{
-        "node_id":   hs.raft.Id(),
-        "is_leader": isLeader,
-        "status":    "healthy",
-        "timestamp": time.Now(),
-    }
+	// Add CORS headers
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 
-    w.Header().Set("Content-Type", "application/json")
-    json.NewEncoder(w).Encode(status)
+	isLeader := hs.raft.IsLeader()
+	status := map[string]interface{}{
+		"node_id":   hs.raft.Id(),
+		"is_leader": isLeader,
+		"status":    "healthy",
+		"timestamp": time.Now(),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(status)
 }
 
 func (hs *httpServer) listFilesHandler(w http.ResponseWriter, r *http.Request) {
-    var files []File
-    hs.stateMachine.files.Range(func(key, value interface{}) bool {
-        files = append(files, *value.(*File))
-        return true
-    })
+	// Add CORS headers
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 
-    w.Header().Set("Content-Type", "application/json")
-    json.NewEncoder(w).Encode(files)
+	var files []File
+	hs.stateMachine.files.Range(func(key, value interface{}) bool {
+		files = append(files, *value.(*File))
+		return true
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(files)
 }
 
 func (hs *httpServer) createFileHandler(w http.ResponseWriter, r *http.Request) {
-    if r.Method != http.MethodPost {
-        http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-        return
-    }
+	// Add CORS headers
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 
-    if !hs.raft.IsLeader() {
-        http.Error(w, "Not the leader - try another node", http.StatusServiceUnavailable)
-        return
-    }
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
 
-    filePath := r.URL.Path
-    log.Printf("Received CreateFile request for %s", filePath)
+	if !hs.raft.IsLeader() {
+		http.Error(w, "Not the leader - try another node", http.StatusServiceUnavailable)
+		return
+	}
 
-    dataDir := "./data"
-    os.MkdirAll(dataDir, 0755)
+	filePath := r.URL.Path
+	log.Printf("Received CreateFile request for %s", filePath)
 
-    dataFilePath := filepath.Join(dataDir, filepath.Base(filePath))
-    file, err := os.Create(dataFilePath)
-    if err != nil {
-        http.Error(w, "Failed to create local file", http.StatusInternalServerError)
-        return
-    }
-    defer file.Close()
+	dataDir := "./data"
+	os.MkdirAll(dataDir, 0755)
 
-    n, err := io.Copy(file, r.Body)
-    if err != nil {
-        http.Error(w, "Failed to write file content", http.StatusInternalServerError)
-        return
-    }
+	dataFilePath := filepath.Join(dataDir, filepath.Base(filePath))
+	file, err := os.Create(dataFilePath)
+	if err != nil {
+		http.Error(w, "Failed to create local file", http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
 
-    cmd := command{
-        Kind: CreateFile,
-        Path: filePath,
-        Size: n,
-    }
+	n, err := io.Copy(file, r.Body)
+	if err != nil {
+		http.Error(w, "Failed to write file content", http.StatusInternalServerError)
+		return
+	}
 
-    _, err = hs.raft.Apply([][]byte{encodeCommand(cmd)})
-    if err != nil {
-        log.Printf("Raft Apply error: %s", err)
-        http.Error(w, "Failed to replicate file metadata", http.StatusInternalServerError)
-        return
-    }
+	cmd := command{
+		Kind: CreateFile,
+		Path: filePath,
+		Size: n,
+	}
 
-    w.WriteHeader(http.StatusCreated)
-    fmt.Fprintf(w, "File '%s' created successfully (%d bytes)", filePath, n)
+	_, err = hs.raft.Apply([][]byte{encodeCommand(cmd)})
+	if err != nil {
+		log.Printf("Raft Apply error: %s", err)
+		http.Error(w, "Failed to replicate file metadata", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	fmt.Fprintf(w, "File '%s' created successfully (%d bytes)", filePath, n)
 }
 
 func (hs *httpServer) getFileHandler(w http.ResponseWriter, r *http.Request) {
-    filePath := r.URL.Path
-    log.Printf("Received GetFile request for %s", filePath)
+	// Add CORS headers
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 
-    _, ok := hs.stateMachine.files.Load(filePath)
-    if !ok {
-        http.Error(w, "File not found", http.StatusNotFound)
-        return
-    }
+	filePath := r.URL.Path
+	log.Printf("Received GetFile request for %s", filePath)
 
-    dataDir := "./data"
-    dataFilePath := filepath.Join(dataDir, filepath.Base(filePath))
+	_, ok := hs.stateMachine.files.Load(filePath)
+	if !ok {
+		http.Error(w, "File not found", http.StatusNotFound)
+		return
+	}
 
-    if _, err := os.Stat(dataFilePath); os.IsNotExist(err) {
-        http.Error(w, "File content not found locally", http.StatusNotFound)
-        return
-    }
+	dataDir := "./data"
+	dataFilePath := filepath.Join(dataDir, filepath.Base(filePath))
 
-    http.ServeFile(w, r, dataFilePath)
+	if _, err := os.Stat(dataFilePath); os.IsNotExist(err) {
+		http.Error(w, "File content not found locally", http.StatusNotFound)
+		return
+	}
+
+	http.ServeFile(w, r, dataFilePath)
 }
 
 type config struct {
