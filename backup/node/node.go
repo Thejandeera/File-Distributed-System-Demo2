@@ -3,9 +3,6 @@ package node
 import (
 	"distributedfs/config"
 	"distributedfs/consensus"
-	"distributedfs/fault"
-	"distributedfs/storage"
-	"distributedfs/time_sync"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,58 +10,75 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
-
-// Node represents a distributed file system node
+// Node represents a distributed file system node with Raft consensus
 type Node struct {
-	Port           string
-	StoragePath    string
-	QuotaLimit     int64
-	RecoveryMgr    *fault.RecoveryManager
-	FileMgr        *storage.FileManager
-	LeaderMgr      *consensus.LeaderManager
-	Server         *http.Server
+	Port        string
+	StoragePath string
+	RaftAddr    string
+	RaftDir     string
+	NodeID      string
+	Server      *http.Server
+	Consensus   *consensus.RaftConsensus
+	isBootstrap bool
 }
 
-// NewNode creates a new node instance
-func NewNode(port string) *Node {
+// NewNode creates a new node instance with Raft consensus
+func NewNode(port, nodeID string, isBootstrap bool) (*Node, error) {
 	// Initialize configuration
 	config.InitializeConfig()
-	
-	storagePath := config.GetStoragePath()
-	quotaLimit := config.GetQuotaLimit()
-	
-	// Create managers
-	recoveryMgr := fault.NewRecoveryManager(port, storagePath)
-	fileMgr := storage.NewFileManager(storagePath, quotaLimit)
-	leaderMgr := consensus.NewLeaderManager([]string{"8000", "8001", "8002"})
-	
-	return &Node{
+
+	storagePath := filepath.Join(config.GetStoragePath(), "node_"+port)
+	raftDir := filepath.Join(storagePath, "raft")
+	filesDir := filepath.Join(storagePath, "files")
+	raftAddr := fmt.Sprintf("localhost:%d", getPortFromString(port)+1000) // Raft on different port
+
+	// Create directories
+	if err := os.MkdirAll(filesDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create storage directory: %v", err)
+	}
+
+	// Initialize Raft consensus
+	raftConsensus, err := consensus.NewRaftConsensus(nodeID, raftAddr, raftDir, filesDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize Raft consensus: %v", err)
+	}
+
+	node := &Node{
 		Port:        port,
 		StoragePath: storagePath,
-		QuotaLimit:  quotaLimit,
-		RecoveryMgr: recoveryMgr,
-		FileMgr:     fileMgr,
-		LeaderMgr:   leaderMgr,
+		RaftAddr:    raftAddr,
+		RaftDir:     raftDir,
+		NodeID:      nodeID,
+		Consensus:   raftConsensus,
+		isBootstrap: isBootstrap,
 	}
+
+	return node, nil
 }
 
 // Start initializes and starts the node
 func (n *Node) Start() error {
-	// Ensure storage directory exists
-	if err := os.MkdirAll(n.StoragePath, os.ModePerm); err != nil {
-		return fmt.Errorf("failed to create storage directory: %v", err)
+	// Bootstrap or join cluster
+	if n.isBootstrap {
+		log.Printf("Bootstrapping new cluster as node %s", n.NodeID)
+		if err := n.Consensus.Bootstrap(); err != nil {
+			return fmt.Errorf("failed to bootstrap cluster: %v", err)
+		}
+	} else {
+		// Wait a moment for bootstrap node to be ready
+		time.Sleep(2 * time.Second)
+		log.Printf("Attempting to join existing cluster as node %s", n.NodeID)
+		// In a real implementation, you'd discover the leader automatically
+		// For now, we'll assume the bootstrap node is on port 8000
+		if err := n.Consensus.Join(n.NodeID, n.RaftAddr); err != nil {
+			log.Printf("Failed to join cluster: %v", err)
+			// Continue anyway, node might still work
+		}
 	}
-
-	// Start background services
-	go time_sync.SimulateLogicalClocks()
-	go time_sync.SyncClock()
-	go consensus.StartRaftElection(n.Port)
-	go n.RecoveryMgr.StartRecoveryProcess()
-	go fault.StartHeartbeat(n.Port)
-	go n.startCleanupRoutine()
 
 	// Setup HTTP routes
 	mux := http.NewServeMux()
@@ -73,10 +87,10 @@ func (n *Node) Start() error {
 	// Create HTTP server
 	n.Server = &http.Server{
 		Addr:    ":" + n.Port,
-		Handler: mux,
+		Handler: n.enableCORS(mux),
 	}
 
-	log.Printf("🟢 Node running on port %s", n.Port)
+	log.Printf("🟢 Node %s running on port %s (Raft: %s)", n.NodeID, n.Port, n.RaftAddr)
 	return n.Server.ListenAndServe()
 }
 
@@ -86,220 +100,266 @@ func (n *Node) setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/download", n.downloadHandler)
 	mux.HandleFunc("/files", n.filesHandler)
 	mux.HandleFunc("/delete", n.deleteHandler)
-	mux.HandleFunc("/health", n.healthCheck)
+	mux.HandleFunc("/health", n.healthHandler)
 	mux.HandleFunc("/stats", n.statsHandler)
-	mux.HandleFunc("/leader", n.leaderHandler)
-	mux.HandleFunc("/fileinfo", n.fileInfoHandler)
-	mux.HandleFunc("/recovery/status", n.recoveryStatusHandler)
-	mux.HandleFunc("/config", n.configHandler)
+	mux.HandleFunc("/raft/stats", n.raftStatsHandler)
+	mux.HandleFunc("/raft/leader", n.raftLeaderHandler)
+	mux.HandleFunc("/raft/join", n.raftJoinHandler)
 }
 
-// enableCORS sets CORS headers
-func (n *Node) enableCORS(w http.ResponseWriter) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, DELETE, PUT")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+// enableCORS middleware
+func (n *Node) enableCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, DELETE, PUT")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		if r.Method == "OPTIONS" {
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
-// uploadHandler handles file uploads
+// uploadHandler handles file uploads through Raft consensus
 func (n *Node) uploadHandler(w http.ResponseWriter, r *http.Request) {
-	n.enableCORS(w)
-	if r.Method == "OPTIONS" {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	if !consensus.IsLeader(n.Port) {
-		http.Error(w, "❌ I'm not the leader", http.StatusForbidden)
+	// Check if this node is the leader
+	if !n.Consensus.IsLeader() {
+		leader := n.Consensus.GetLeader()
+		if leader != "" {
+			// Redirect to leader
+			leaderURL := fmt.Sprintf("http://%s:%s/upload",
+				strings.Split(leader, ":")[0],
+				getHTTPPortFromRaftAddr(leader))
+			http.Redirect(w, r, leaderURL, http.StatusTemporaryRedirect)
+			return
+		}
+		http.Error(w, "No leader available", http.StatusServiceUnavailable)
 		return
 	}
 
+	// Parse multipart form
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		http.Error(w, "❌ Failed to read file", http.StatusBadRequest)
+		http.Error(w, "Failed to read file: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	defer file.Close()
 
-	dstPath := filepath.Join(n.StoragePath, header.Filename)
+	// Read file content
+	fileBytes, err := io.ReadAll(file)
+	if err != nil {
+		http.Error(w, "Failed to read file content: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-	// Conflict detection
-	if _, err := os.Stat(dstPath); err == nil {
-		existingInfo, _ := os.Stat(dstPath)
-		now := time_sync.GetCorrectedTime()
-		if now.Before(existingInfo.ModTime()) {
-			log.Println("⚡ Conflict detected: Incoming file older, rejecting upload")
-			http.Error(w, "❌ Conflict: Existing file is newer", http.StatusConflict)
+	// Apply command through Raft
+	if err := n.Consensus.ApplyCommand("upload", header.Filename, fileBytes); err != nil {
+		http.Error(w, "Failed to replicate file: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("✅ File uploaded via Raft: %s", header.Filename)
+	fmt.Fprintf(w, "✅ File uploaded successfully: %s", header.Filename)
+}
+
+// deleteHandler handles file deletion through Raft consensus
+func (n *Node) deleteHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "DELETE" && r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	filename := r.URL.Query().Get("name")
+	if filename == "" {
+		http.Error(w, "Missing filename parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Check if this node is the leader
+	if !n.Consensus.IsLeader() {
+		leader := n.Consensus.GetLeader()
+		if leader != "" {
+			// Redirect to leader
+			leaderURL := fmt.Sprintf("http://%s:%s/delete?name=%s",
+				strings.Split(leader, ":")[0],
+				getHTTPPortFromRaftAddr(leader),
+				filename)
+			http.Redirect(w, r, leaderURL, http.StatusTemporaryRedirect)
 			return
 		}
-		log.Println("⚡ Conflict detected: Overwriting with newer upload")
-	}
-
-	dst, err := os.Create(dstPath)
-	if err != nil {
-		http.Error(w, "❌ Failed to save file", http.StatusInternalServerError)
-		return
-	}
-	defer dst.Close()
-
-	_, err = io.Copy(dst, file)
-	if err != nil {
-		http.Error(w, "❌ Failed to write file", http.StatusInternalServerError)
+		http.Error(w, "No leader available", http.StatusServiceUnavailable)
 		return
 	}
 
-	go storage.ReplicateToPeers(header.Filename, dstPath)
+	// Apply command through Raft
+	if err := n.Consensus.ApplyCommand("delete", filename, nil); err != nil {
+		http.Error(w, "Failed to delete file: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-	fmt.Fprintf(w, "✅ File uploaded: %s", header.Filename)
+	log.Printf("✅ File deleted via Raft: %s", filename)
+	fmt.Fprintf(w, "✅ File deleted successfully: %s", filename)
 }
 
-// downloadHandler handles file downloads
+// downloadHandler serves files directly (read-only operation)
 func (n *Node) downloadHandler(w http.ResponseWriter, r *http.Request) {
-	n.enableCORS(w)
 	filename := r.URL.Query().Get("name")
 	if filename == "" {
-		http.Error(w, "Missing filename", http.StatusBadRequest)
-		return
-	}
-	http.ServeFile(w, r, filepath.Join(n.StoragePath, filename))
-}
-
-// filesHandler returns list of files
-func (n *Node) filesHandler(w http.ResponseWriter, r *http.Request) {
-	n.enableCORS(w)
-	files, _ := os.ReadDir(n.StoragePath)
-	var names []string
-	for _, f := range files {
-		if !f.IsDir() {
-			names = append(names, f.Name())
-		}
-	}
-	json.NewEncoder(w).Encode(names)
-}
-
-// deleteHandler handles file deletion
-func (n *Node) deleteHandler(w http.ResponseWriter, r *http.Request) {
-	n.enableCORS(w)
-	name := r.URL.Query().Get("name")
-	os.Remove(filepath.Join(n.StoragePath, name))
-	w.WriteHeader(http.StatusOK)
-}
-
-// healthCheck returns node health status
-func (n *Node) healthCheck(w http.ResponseWriter, r *http.Request) {
-	n.enableCORS(w)
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
-}
-
-// statsHandler returns storage statistics
-func (n *Node) statsHandler(w http.ResponseWriter, r *http.Request) {
-	n.enableCORS(w)
-	files, _ := os.ReadDir(n.StoragePath)
-	var totalSize int64
-	for _, f := range files {
-		if info, err := os.Stat(filepath.Join(n.StoragePath, f.Name())); err == nil {
-			totalSize += info.Size()
-		}
-	}
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"totalFiles": len(files),
-		"totalBytes": totalSize,
-		"quotaBytes": n.QuotaLimit,
-	})
-}
-
-// leaderHandler returns current leader information
-func (n *Node) leaderHandler(w http.ResponseWriter, r *http.Request) {
-	n.enableCORS(w)
-	w.Write([]byte("Current Leader: " + consensus.GetLeader()))
-}
-
-// fileInfoHandler returns file information
-func (n *Node) fileInfoHandler(w http.ResponseWriter, r *http.Request) {
-	n.enableCORS(w)
-
-	filename := r.URL.Query().Get("name")
-	if filename == "" {
-		http.Error(w, "Missing filename", http.StatusBadRequest)
+		http.Error(w, "Missing filename parameter", http.StatusBadRequest)
 		return
 	}
 
-	fullPath := filepath.Join(n.StoragePath, filename)
+	filesDir := filepath.Join(n.StoragePath, "files")
+	filePath := filepath.Join(filesDir, filename)
 
-	info, err := os.Stat(fullPath)
-	if err != nil {
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		http.Error(w, "File not found", http.StatusNotFound)
 		return
 	}
 
-	response := map[string]interface{}{
-		"modTime": info.ModTime().Unix(),
-		"size":    info.Size(),
+	http.ServeFile(w, r, filePath)
+}
+
+// filesHandler returns list of files
+func (n *Node) filesHandler(w http.ResponseWriter, r *http.Request) {
+	filesDir := filepath.Join(n.StoragePath, "files")
+	files, err := os.ReadDir(filesDir)
+	if err != nil {
+		http.Error(w, "Failed to read directory", http.StatusInternalServerError)
+		return
+	}
+
+	var fileNames []string
+	for _, file := range files {
+		if !file.IsDir() {
+			fileNames = append(fileNames, file.Name())
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	json.NewEncoder(w).Encode(fileNames)
 }
 
-// recoveryStatusHandler returns recovery status
-func (n *Node) recoveryStatusHandler(w http.ResponseWriter, r *http.Request) {
-	n.enableCORS(w)
-	status := n.RecoveryMgr.GetRecoveryStatus()
-	json.NewEncoder(w).Encode(status)
+// healthHandler returns node health
+func (n *Node) healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
 }
 
-// configHandler handles configuration requests
-func (n *Node) configHandler(w http.ResponseWriter, r *http.Request) {
-	n.enableCORS(w)
-	
-	switch r.Method {
-	case "GET":
-		config := config.GetConfig()
-		json.NewEncoder(w).Encode(config)
-	case "PUT":
-		var updates map[string]interface{}
-		if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
-			http.Error(w, "Invalid JSON", http.StatusBadRequest)
-			return
-		}
-		
-		if err := config.UpdateConfig(updates); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]string{"status": "updated"})
-	default:
+// statsHandler returns node statistics
+func (n *Node) statsHandler(w http.ResponseWriter, r *http.Request) {
+	stats := map[string]interface{}{
+		"nodeId":    n.NodeID,
+		"port":      n.Port,
+		"raftAddr":  n.RaftAddr,
+		"isLeader":  n.Consensus.IsLeader(),
+		"leader":    n.Consensus.GetLeader(),
+		"raftState": n.Consensus.GetState(),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
+}
+
+// raftStatsHandler returns detailed Raft statistics
+func (n *Node) raftStatsHandler(w http.ResponseWriter, r *http.Request) {
+	stats := n.Consensus.GetStats()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
+}
+
+// raftLeaderHandler returns current leader information
+func (n *Node) raftLeaderHandler(w http.ResponseWriter, r *http.Request) {
+	leader := map[string]interface{}{
+		"leader":   n.Consensus.GetLeader(),
+		"isLeader": n.Consensus.IsLeader(),
+		"state":    n.Consensus.GetState(),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(leader)
+}
+
+// raftJoinHandler allows nodes to join the cluster
+func (n *Node) raftJoinHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
+
+	var joinRequest struct {
+		NodeID   string `json:"nodeId"`
+		RaftAddr string `json:"raftAddr"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&joinRequest); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if err := n.Consensus.Join(joinRequest.NodeID, joinRequest.RaftAddr); err != nil {
+		http.Error(w, "Failed to join node: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "joined"})
 }
 
-// startCleanupRoutine starts the cleanup routine
-func (n *Node) startCleanupRoutine() {
-	ticker := time.NewTicker(1 * time.Hour)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		n.FileMgr.Cleanup()
-	}
-}
-
-// Stop gracefully stops the node
+// Stop gracefully shuts down the node
 func (n *Node) Stop() error {
+	log.Printf("Stopping node %s...", n.NodeID)
+
+	if n.Consensus != nil {
+		if err := n.Consensus.Shutdown(); err != nil {
+			log.Printf("Error shutting down Raft: %v", err)
+		}
+	}
+
 	if n.Server != nil {
 		return n.Server.Close()
 	}
+
 	return nil
 }
 
-// GetNodeInfo returns node information
-func (n *Node) GetNodeInfo() map[string]interface{} {
-	return map[string]interface{}{
-		"port":        n.Port,
-		"storagePath": n.StoragePath,
-		"quotaLimit":  n.QuotaLimit,
-		"isLeader":    consensus.IsLeader(n.Port),
-		"leader":      consensus.GetLeader(),
+// Helper functions
+func getPortFromString(portStr string) int {
+	switch portStr {
+	case "8000":
+		return 8000
+	case "8001":
+		return 8001
+	case "8002":
+		return 8002
+	default:
+		return 8000
+	}
+}
+
+func getHTTPPortFromRaftAddr(raftAddr string) string {
+	// Convert Raft address back to HTTP port
+	// Raft ports are HTTP ports + 1000
+	parts := strings.Split(raftAddr, ":")
+	if len(parts) != 2 {
+		return "8000"
+	}
+
+	switch parts[1] {
+	case "9000":
+		return "8000"
+	case "9001":
+		return "8001"
+	case "9002":
+		return "8002"
+	default:
+		return "8000"
 	}
 }
